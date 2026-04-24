@@ -1,0 +1,228 @@
+/*
+  Purpose:
+    Send sensor and controller data over serial monitor periodically based on the sample interval
+    Recieve commands over serial monitor
+
+  Message send/recieve format: msgType|timestamp|UUID(opt)|paylod
+*/
+
+#include <RTClib.h>
+#include <Adafruit_MLX90614.h>
+// TODO: ADD NEW LIBRARIES HERE
+
+// ****************************************
+// TESTING AND SIMULATION MODE 
+// Set to 'false' when the ardino is set up with sensors
+const bool SIMULATION_MODE = false;
+
+// Simulated State Variables
+float simTemp = 35.0;
+float simPH = 7.0;
+float simDO = 30.0;
+float simCD = 0.5;
+
+bool isHeating = false;
+bool isMotorSimOn = false;
+// ****************************************
+
+// controllers and sensors
+const int led_pin = 8;
+// TODO: ADD NEW PINS AND SENSOR OBJECTS HERE
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+RTC_DS3231 rtc;
+
+// timing
+unsigned long lastSampleTime = 0;
+int sample_rate_sec = 5; // set a default of 5
+
+// the setup function runs once when you press reset or power the board
+void setup() {
+  
+  // initialize digital pin LED_BUILTIN as an input and make sure it's off
+  // TODO: INITIALIZE ALL OTHER OBJECTS
+  pinMode(led_pin, OUTPUT);
+  digitalWrite(led_pin, LOW); 
+
+  Serial.begin(9600); // sets up to recieve serial info
+  rtc.begin();
+  // TODO: START ANY NEW LIBRARIES
+
+  // only require the real MLX sensor if we are NOT in simulation mode
+  if (!SIMULATION_MODE) {
+    if (!mlx.begin()) {
+      send_msg("error", "MLX sensor fail", "");
+      while (1); // Freeze here if real hardware is missing
+    }
+  }
+
+  // TODO: ENSURE CONNECTION FOR NEW OBJECTS
+
+  // send a "Ready" signal so Python knows the boot is finished
+  send_msg("system", "Arduino Initialized", "0");
+}
+
+
+void send_msg(const char* msg_type, const char* payload, const char* uuid) {
+  DateTime now = rtc.now();
+  
+  // generate datetime in python format: YYYY-MM-DD HH:MM:SS
+  char ts[20];
+  snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d", 
+           now.year(), now.month(), now.day(), 
+           now.hour(), now.minute(), now.second());
+
+  // print segments to Serial buffer for less memory overhead
+  Serial.print(msg_type);
+  Serial.print("|");
+  Serial.print(ts);
+  Serial.print("|");
+  Serial.print(uuid); // Empty string if not a request
+  Serial.print("|");
+  Serial.println(payload); // Einal println signals Python's readline()
+}
+
+
+void loop() {
+
+  // check for python commands without blocking serial port
+  if (Serial.available() > 0) {
+    String incoming = Serial.readStringUntil('\n');
+    processIncoming(incoming);
+  }
+
+  // send sensor and controller data periodically
+  if (millis() - lastSampleTime >= (sample_rate_sec * 1000)) {
+    lastSampleTime = millis();
+  
+    // --- Send Sensor Data ---
+    char sensorPayload[50];
+    // dtostrf converts floats to strings: (value, width, precision, buffer)
+    char tObj[10];
+    bool currentMotorState;
+
+    // GENERATE DATA BASED ON SIMULATION MODE
+    if (SIMULATION_MODE) {
+      // If Pi turned heater ON, temp rises. If OFF, it cools down.
+      if (isHeating) simTemp += 0.5;
+      else simTemp -= 0.2;
+
+      // DO sim (keep between 0 and 100)
+      if (isMotorSimOn) simDO += 1.0;
+      else simDO -= 0.5;
+      if (simDO > 100.0) simDO = 100.0;
+      if (simDO < 0.0) simDO = 0.0;
+
+      // Cell density sim
+      simCD += 0.02;
+
+      // Ph Sim
+
+      // arduino needs dtostrf to convert flaots to char arrays
+      char tObj[10];
+      char doStr[10];
+      char cdStr[10];
+      char phStr[10];
+      dtostrf(simTemp, 4, 2, tObj);
+      dtostrf(simDO, 4, 2, doStr);
+      dtostrf(simCD, 4, 2, cdStr);
+      dtostrf(simPH, 4, 2, phStr);
+      
+      snprintf(sensorPayload, sizeof(sensorPayload), "tempF=%s,ambientF=72,do=%s,cd=%s,ph=%s", tObj, doStr, cdStr, phStr);
+      currentMotorState = isMotorSimOn;
+
+    } else {
+      dtostrf(mlx.readObjectTempF(), 4, 2, tObj);
+      snprintf(sensorPayload, sizeof(sensorPayload), "tempF=%s,ambientF=%d", tObj, (int)mlx.readAmbientTempF());
+      currentMotorState = digitalRead(led_pin);
+    }
+
+    // send data to py
+    send_msg("sensorData", sensorPayload, "");
+    send_msg("controllerStates", currentMotorState ? "motor=True" : "motor=False", "");
+    
+    // TODO: READ NEW SENSORS HERE AND APPEND THEIR INFORMATION TO PAYLOAD
+    // (make sure enough space has been allocated in the array when adding new elements)
+    // COMMAS SEPARATE MULTIPLE VALUES
+
+    // --- Send Controller States ---
+    // TODO: CHECK NEW STATE
+    // TODO: SEND STATE
+  }
+}
+
+
+// handles toggle requests from python
+void processIncoming(String rawMsg) {
+  // Expected Python Format: toggleRequest|timestamp|UUID|motor:toggle
+  
+  // parse/decode
+  int firstPipe = rawMsg.indexOf('|');
+  int secondPipe = rawMsg.indexOf('|', firstPipe + 1);
+  int thirdPipe = rawMsg.indexOf('|', secondPipe + 1);
+
+  // ensure message format
+  if (firstPipe != -1) {
+    String type = rawMsg.substring(0, firstPipe);
+    String uuid = rawMsg.substring(secondPipe + 1, thirdPipe);
+    String payload = rawMsg.substring(thirdPipe + 1);
+
+    if (type == "actionRequest" || type == "toggleRequest") {
+      
+      int colonIndex = payload.indexOf(':');
+      if (colonIndex != -1) {
+        String target = payload.substring(0, colonIndex);
+        String action = payload.substring(colonIndex + 1);
+
+        // MOTOR CONTROL STUFF
+        if (target == "motor") {
+          bool targetState = digitalRead(led_pin); // Default to current state
+          
+          if (action == "on") targetState = HIGH;
+          else if (action == "off") targetState = LOW;
+          else if (action == "toggle") targetState = !digitalRead(led_pin);
+
+          if (SIMULATION_MODE) {
+            isMotorSimOn = targetState; // Update fake motor
+          } else {
+            digitalWrite(led_pin, targetState); // Update real motor
+            delay(5);
+          }
+
+          send_msg("states", targetState ? "motor=True" : "motor=False", uuid.c_str());
+        }
+
+        // --- HEATER CONTROL ---
+        else if (target == "heater") {
+          if (action == "on") {
+            isHeating = true;
+            // TODO: if (!SIMULATION_MODE) digitalWrite(HEATER_PIN, HIGH);
+          } else if (action == "off") {
+            isHeating = false;
+            // TODO: if (!SIMULATION_MODE) digitalWrite(HEATER_PIN, LOW);
+          } else if (action == "toggle") { // manual UI clicks
+            isHeating = !isHeating;
+          }
+
+          send_msg("states", isHeating ? "heater=True" : "heater=False", uuid.c_str());
+        }
+
+        // TODO: ADD NEW CONTROLLERS HERE
+        // else if (target == "heater") {
+        //   // Heater logic here...
+        // }
+      }
+
+      // TODO: NEW ELSE BLOCK FOR NEW CONTROLLERS
+    } else if (type == "config") {
+      int eqIndex = payload.indexOf('=');
+      if (eqIndex != -1) {
+        String valStr = payload.substring(eqIndex + 1);
+        sample_rate_sec = valStr.toInt(); // update global var
+        
+        // send confirmation
+        send_msg("config", "sample_rate_updated", uuid.c_str());
+      }
+    }
+    // other types of commands go here
+  }
+}

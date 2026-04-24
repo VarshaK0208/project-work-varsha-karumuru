@@ -1,0 +1,313 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import json
+import os
+import styles
+from datetime import datetime
+
+class RecipeCreatorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Recipe Creator")
+        self.root.geometry("750x450")
+        
+        # ensure recipe directory exists
+        if not os.path.exists(styles.RECIPE_DIR):
+            os.makedirs(styles.RECIPE_DIR)
+
+        styles.apply_theme(self.root)
+        self.set_scrollable_area()
+        self.create_widgets()
+
+    def set_scrollable_area(self):
+        # main container
+        container = ttk.Frame(self.root)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # canvas
+        self.canvas = tk.Canvas(container, bg=styles.COLOR_BG, highlightthickness=0)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # scrollbar
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.scrollable_frame = ttk.Frame(self.canvas, padding=styles.PAD_X)
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+
+        # bindings for resizing and scrolling
+        self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width))
+
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+        # Unbind ONLY when this specific window is destroyed
+        # self.bind("<Destroy>", self._cleanup_scroll)
+
+
+    # def _cleanup_scroll(self, event):
+    #     # When the window closes, stop listening to the mouse wheel
+    #     self.canvas.unbind_all("<MouseWheel>")
+    #     self.canvas.unbind_all("<Button-4>")
+    #     self.canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event):
+        try:
+            # CRITICAL: This single line prevents the "invalid command name" crash.
+            # If the canvas is dead, stop immediately.
+            if not self.canvas.winfo_exists():
+                return
+            
+            # Scroll logic
+            if event.delta:
+                self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            elif event.num == 5:
+                self.canvas.yview_scroll(1, "units")
+            elif event.num == 4:
+                self.canvas.yview_scroll(-1, "units")
+        except tk.TclError:
+            pass
+
+    def create_widgets(self):
+        # --- Header ---
+        ttk.Label(self.scrollable_frame, text="Create New Recipe", style="Header.TLabel").pack(pady=(10, 20))
+
+        # --- Metadata Section ---
+        meta_frame = ttk.LabelFrame(self.scrollable_frame, text="Recipe Metadata", padding=styles.PAD_Y)
+        meta_frame.pack(fill=tk.X, pady=5)
+        
+        self.entry_name = self.create_input(meta_frame, "Recipe Name:", 0)
+        self.entry_desc = self.create_input(meta_frame, "Description:", 1)
+        self.entry_duration = self.create_input(meta_frame, "Run Duration (hours):", 2)
+        self.entry_species = self.create_input(meta_frame, "Species/ID:", 3)
+        self.entry_feedstock = self.create_input(meta_frame, "Feed Stock:", 4)
+        self.entry_buffer = self.create_input(meta_frame, "Buffer Type:", 5)
+
+        # --- Cell Type Selection --- #
+        ttk.Label(meta_frame, text="Cell Type:").grid(row=6, column=0, sticky="w", padx=5, pady=5)
+        
+        radio_frame = ttk.Frame(meta_frame)
+        radio_frame.grid(row=6, column=1, sticky="w", padx=5, pady=5)
+        
+        self.cell_type_var = tk.StringVar(value="Bacterial")
+        cell_types = [("Bacterial", "Bacterial"), ("Fungal", "Fungal"), ("Mammalian", "Mammalian")]
+
+        for i, (text, value) in enumerate(cell_types):
+            rb = ttk.Radiobutton(radio_frame, text=text, variable=self.cell_type_var, value=value)
+            rb.pack(side=tk.LEFT, padx=(0, 15))
+
+        # --- Setpoints Section ---
+        sp_frame = ttk.LabelFrame(self.scrollable_frame, text="Control Setpoints", padding=styles.PAD_Y)
+        sp_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # Headers
+        ttk.Label(sp_frame, text="Parameter").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(sp_frame, text="Target").grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(sp_frame, text="Tolerance (+/-)").grid(row=0, column=2, padx=5, pady=5)
+
+        # Inputs
+        self.sp_temp = self.create_setpoint_row(sp_frame, "Temperature (°C)", 1, default="37.0", tol="2.0")
+        self.sp_ph = self.create_setpoint_row(sp_frame, "pH Level", 2, default="7.0", tol="1.0")
+        self.sp_do = self.create_setpoint_row(sp_frame, "Dissolved Oxygen (%)", 3, default="30.0", tol="5.0")
+        self.sp_vol = self.create_setpoint_row(sp_frame, "Initial Volume (mL)", 4, default="450", tol="0")
+        self.sp_rpm = self.create_setpoint_row(sp_frame, "Agitation (RPM)", 5, default="200", tol="0")
+
+        # --- Inoculation Point ---
+        ttk.Separator(sp_frame, orient='horizontal').grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
+        
+        ttk.Label(sp_frame, text="Inoculation Point?").grid(row=7, column=0, sticky="w", padx=5, pady=5)
+        self.has_inoculation = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sp_frame, variable=self.has_inoculation).grid(row=7, column=1, sticky="w", padx=5)
+
+        ttk.Label(sp_frame, text="Inoculation Type:").grid(row=8, column=0, sticky="w", padx=5, pady=5)
+        self.inoc_type = tk.StringVar(value="Time-based")
+        type_frame = ttk.Frame(sp_frame)
+        type_frame.grid(row=8, column=1, columnspan=2, sticky="w", padx=5)
+        ttk.Radiobutton(type_frame, text="Time", variable=self.inoc_type, value="Time-based").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(type_frame, text="Density", variable=self.inoc_type, value="Cell-density based").pack(side=tk.LEFT)
+
+        ttk.Label(sp_frame, text="Trigger Value (hours/DO):").grid(row=9, column=0, sticky="w", padx=5, pady=5)
+        self.entry_inoc_val = ttk.Entry(sp_frame, width=10, justify="center")
+        self.entry_inoc_val.insert(0, "0.0")
+        self.entry_inoc_val.grid(row=9, column=1, sticky="w", padx=5)
+
+        # # --- Feed Strategy (New Section Example) ---
+        # feed_frame = ttk.LabelFrame(self.scrollable_frame, text="Feed Strategy", padding=styles.PAD_Y)
+        # feed_frame.pack(fill=tk.X, pady=10)
+        
+        # ttk.Label(feed_frame, text="Feed Start Time (hrs):").grid(row=0, column=0, sticky="w", padx=5)
+        # self.entry_feed_start = ttk.Entry(feed_frame, width=10, font=styles.FONT_MAIN)
+        # self.entry_feed_start.grid(row=0, column=1, padx=5, pady=5)
+
+        # --- Action Buttons ---
+        btn_frame = ttk.Frame(self.scrollable_frame, padding=(0, 20))
+        btn_frame.pack(fill=tk.X)
+        
+        save_btn = ttk.Button(btn_frame, text="Save Recipe", command=self.save_recipe)
+        save_btn.pack(side=tk.RIGHT, padx=5, ipady=10)
+        
+        clear_btn = ttk.Button(btn_frame, text="Reset Form", command=self.clear_form)
+        clear_btn.pack(side=tk.RIGHT, padx=5, ipady=10)
+
+    def create_input(self, parent, label_text, row):
+        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        entry = ttk.Entry(parent, width=30, font=styles.FONT_MAIN)
+        entry.grid(row=row, column=1, sticky="w", padx=5, pady=5)
+        return entry
+
+    def create_setpoint_row(self, parent, label, row, default="", tol="0"):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        
+        target_entry = ttk.Entry(parent, width=10, justify="center")
+        target_entry.insert(0, default)
+        target_entry.grid(row=row, column=1, padx=5, pady=5)
+        
+        tol_entry = ttk.Entry(parent, width=10, justify="center")
+        tol_entry.insert(0, tol)
+        tol_entry.grid(row=row, column=2, padx=5, pady=5)
+        
+        return (target_entry, tol_entry)
+
+    def get_float(self, entry, name):
+        """Validates that input is a float"""
+        try:
+            val = float(entry.get())
+            if val < 0:
+                raise ValueError
+            return val
+        except ValueError:
+            raise ValueError(f"Invalid value for {name}. Must be a positive number.")
+
+    def save_recipe(self):
+        name = self.entry_name.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Recipe Name is required.")
+            return
+
+        try:
+            # Construct the data dictionary
+            recipe_data = {
+                "metadata": {
+                    "name": name,
+                    "description": self.entry_desc.get(),
+                    "species": self.entry_species.get(),
+                    "feedstock": self.entry_feedstock.get(),
+                    "buffer": self.entry_buffer.get(),
+                    "cell_type": self.cell_type_var.get(),
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_hours": self.get_float(self.entry_duration, "Duration")
+                },
+                "setpoints": {
+                    "temperature": {
+                        "target": self.get_float(self.sp_temp[0], "Temperature"),
+                        "tolerance": self.get_float(self.sp_temp[1], "Temp Tolerance")
+                    },
+                    "ph": {
+                        "target": self.get_float(self.sp_ph[0], "pH"),
+                        "tolerance": self.get_float(self.sp_ph[1], "pH Tolerance")
+                    },
+                    "do": {
+                        "target": self.get_float(self.sp_do[0], "Dissolved Oxygen"),
+                        "tolerance": self.get_float(self.sp_do[1], "DO Tolerance")
+                    },
+                    "volume": {
+                        "initial": self.get_float(self.sp_vol[0], "Volume"),
+                        # Volume typically doesn't have a control tolerance in this context
+                    },
+                    "agitation": {
+                        "rpm": self.get_float(self.sp_rpm[0], "RPM")
+                    },
+                    "inoculation": {
+                        "enabled": self.has_inoculation.get(),
+                        "type": self.inoc_type.get() if self.has_inoculation.get() else None,
+                        "target_value": self.get_float(self.entry_inoc_val, "Inoculation Value") if self.has_inoculation.get() else 0.0
+                    }
+                }
+            }
+
+            # additional field logic goes here
+
+            # Create filename (sanitize spaces)
+            safe_filename = "".join([c for c in name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(" ", "_")
+            filepath = os.path.join(styles.RECIPE_DIR, f"{safe_filename}.json")
+
+            # check if recipe exists
+            if os.path.exists(filepath):
+                # ask for override
+                should_overwrite = messagebox.askyesno(
+                    "Recipe Exists", 
+                    f"A recipe named '{safe_filename}' already exists.\n\nDo you want to overwrite it?"
+                )
+                
+                if not should_overwrite:
+                    return
+
+            # Write to JSON
+            with open(filepath, 'w') as f:
+                json.dump(recipe_data, f, indent=4)
+
+            # ask to continue or quit
+            response = messagebox.askyesno(
+                "Recipe Saved", 
+                f"Recipe saved to:\n{filepath}\n\nDo you want to create another recipe?",
+                parent=self.root
+            )
+
+            if response:  # User clicked "Yes"
+                self.clear_form()
+            else:         # User clicked "No"
+                self.root.destroy()
+
+        except ValueError as e:
+            messagebox.showerror("Input Error", str(e))
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save file: {e}")
+
+    def clear_form(self):
+
+        self.entry_name.delete(0, tk.END)
+        self.entry_desc.delete(0, tk.END)
+        self.entry_duration.delete(0, tk.END)
+        self.cell_type_var.set("Bacterial")
+        self.entry_species.delete(0, tk.END)
+        self.entry_feedstock.delete(0, tk.END)
+        self.entry_buffer.delete(0, tk.END)
+        self.has_inoculation.set(False)
+        self.inoc_type.set("Time-based")
+        self.entry_inoc_val.delete(0, tk.END)
+        self.entry_inoc_val.insert(0, "0.0")
+
+        def set_text(entry, text):
+            entry.delete(0, tk.END)
+            entry.insert(0, text)
+
+        # Temperature
+        set_text(self.sp_temp[0], "37.0")
+        set_text(self.sp_temp[1], "2.0")
+
+        # pH
+        set_text(self.sp_ph[0], "7.0")
+        set_text(self.sp_ph[1], "1.0")
+
+        # DO
+        set_text(self.sp_do[0], "30.0")
+        set_text(self.sp_do[1], "5.0")
+
+        # Volume
+        set_text(self.sp_vol[0], "450")
+        set_text(self.sp_vol[1], "0") # Tolerance usually 0
+
+        # RPM
+        set_text(self.sp_rpm[0], "200")
+        set_text(self.sp_rpm[1], "0") # Tolerance usually 0
+        
+        # Focus on the Name field so user can start typing immediately
+        self.entry_name.focus_set()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = RecipeCreatorApp(root)
+    root.mainloop()
